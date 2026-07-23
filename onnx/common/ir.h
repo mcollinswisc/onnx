@@ -92,12 +92,15 @@ enum class AttributeKind : uint8_t {
   g,
   gs,
   tp,
-  tps
+  tps,
+  // A reference to an attribute of the enclosing function. Unlike the kinds
+  // above it holds no value; see ReferenceAttributeValue.
+  ref
 };
 
 static inline const char* toString(AttributeKind kind) {
   // NOLINTNEXTLINE(modernize-avoid-c-arrays)
-  static constexpr const char* names[] = {"f", "fs", "i", "is", "s", "ss", "t", "ts", "g", "gs", "tp", "tps"};
+  static constexpr const char* names[] = {"f", "fs", "i", "is", "s", "ss", "t", "ts", "g", "gs", "tp", "tps", "ref"};
   ONNX_ASSERT(size_t(kind) < std::size(names))
   return names[static_cast<int>(kind)];
 }
@@ -162,6 +165,31 @@ using GraphsAttr = VectorAttributeValue<std::shared_ptr<Graph>, AttributeKind::g
 using TypeProtoAttr = ScalarAttributeValue<TypeProto, AttributeKind::tp>;
 using TypeProtosAttr = VectorAttributeValue<TypeProto, AttributeKind::tps>;
 
+// A function attribute reference: an attribute of a node inside a function
+// body, which instead of a concrete value refers by name to an attribute of
+// the function.
+// See onnx.AttributeProto.ref_attr_name.
+struct ReferenceAttributeValue final : public AttributeValue {
+  ReferenceAttributeValue(Symbol name, std::string ref_attr_name, AttributeProto_AttributeType declared_type)
+      : AttributeValue(name), ref_attr_name_(std::move(ref_attr_name)), declared_type_(declared_type) {}
+  AttributeKind kind() const override {
+    return AttributeKind::ref;
+  }
+  Ptr clone() const override {
+    return std::make_unique<ReferenceAttributeValue>(name, ref_attr_name_, declared_type_);
+  }
+  const std::string& ref_attr_name() const {
+    return ref_attr_name_;
+  }
+  AttributeProto_AttributeType declared_type() const {
+    return declared_type_;
+  }
+
+ private:
+  std::string ref_attr_name_;
+  AttributeProto_AttributeType declared_type_;
+};
+
 // CRTP so that Node which inherits Attributes can be return for
 // method chaining e.g:
 // Node * n = g->create(kSelect)->set_i(kOffset,3)->set_f(kValue,3.5);
@@ -221,6 +249,31 @@ struct Attributes {
   CREATE_ACCESSOR(TypeProtos, tps)
 
 #undef CREATE_ACCESSOR
+
+  // Accessors for reference attributes (AttributeKind::ref). These cannot use
+  // the CREATE_ACCESSOR macro because a reference has no value; it stores only
+  // the attribute name and the declared attribute type.
+  Derived* ref_(Symbol name, std::string ref_attr_name, AttributeProto_AttributeType declared_type) {
+    auto it = find(name, false);
+    auto nv = std::make_unique<ReferenceAttributeValue>(name, std::move(ref_attr_name), declared_type);
+    if (it == values_.end()) {
+      values_.push_back(std::move(nv));
+    } else {
+      *it = std::move(nv);
+    }
+    return This();
+  }
+  bool isReference(Symbol name) const {
+    return kindOf(name) == AttributeKind::ref;
+  }
+  const std::string& refAttrName(Symbol name) const {
+    auto it = find(name, true);
+    return static_cast<ReferenceAttributeValue*>(it->get())->ref_attr_name();
+  }
+  AttributeProto_AttributeType refType(Symbol name) const {
+    auto it = find(name, true);
+    return static_cast<ReferenceAttributeValue*>(it->get())->declared_type();
+  }
 
  private:
   Derived* This() {
