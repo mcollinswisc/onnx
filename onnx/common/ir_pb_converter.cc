@@ -121,6 +121,15 @@ static Tensor tensorProtoToTensor(const ONNX_NAMESPACE::TensorProto& tp) {
 
 static void convertAttribute(const ONNX_NAMESPACE::AttributeProto& ap, Node& n, const int64_t ir_version = IR_VERSION) {
   Symbol sym = Symbol(ap.name());
+
+  // In case ref_attr_name is set, this attribute does not contain data, and
+  // instead it's a reference to the parent function's attribute of the given
+  // name.
+  if (!ap.ref_attr_name().empty()) {
+    n.ref_(sym, ap.ref_attr_name(), ap.type());
+    return;
+  }
+
   switch (ap.type()) {
     case ONNX_NAMESPACE::AttributeProto_AttributeType_FLOAT:
       n.f_(sym, ap.f());
@@ -605,6 +614,12 @@ static void addAttribute(ONNX_NAMESPACE::NodeProto& n_p, const Node& n, Symbol n
         auto* tp = attr->add_type_protos();
         tp->CopyFrom(v);
       }
+    } break;
+    case AttributeKind::ref: {
+      // A reference to a function attribute: emit ref_attr_name and the type,
+      // no value.
+      attr->set_ref_attr_name(n.refAttrName(name));
+      attr->set_type(n.refType(name));
     } break;
   }
 }

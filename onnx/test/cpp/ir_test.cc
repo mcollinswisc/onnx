@@ -69,5 +69,69 @@ TEST(Tensor, ElemNumLargeTensorNoOverflow) {
   EXPECT_EQ(t.size_from_dim(1), int64_t{50000});
 }
 
+// The AttributeProto.ref_attr_name field (for an attribute with no value that
+// is a reference to a function attribute) must survive the ImportModelProto ->
+// ExportModelProto round-trip.
+TEST(IR, ReferenceAttributeRoundTrip) {
+  ModelProto model_in;
+  model_in.set_ir_version(IR_VERSION);
+  auto* opset = model_in.add_opset_import();
+  opset->set_domain("");
+  opset->set_version(16);
+  auto* graph = model_in.mutable_graph();
+  graph->set_name("g");
+
+  auto* input = graph->add_input();
+  input->set_name("x");
+  input->mutable_type()->mutable_tensor_type()->set_elem_type(TensorProto_DataType_FLOAT);
+  auto* output = graph->add_output();
+  output->set_name("y");
+  output->mutable_type()->mutable_tensor_type()->set_elem_type(TensorProto_DataType_FLOAT);
+
+  auto* node = graph->add_node();
+  node->set_op_type("LeakyRelu");
+  node->add_input("x");
+  node->add_output("y");
+  // A reference attribute: names the referenced parent-function attribute and
+  // a type, but carries no value.
+  // This is technically invalid to set outside a FunctionProto: but since the
+  // IR doesn't model-local functions this is the only way to set up a model
+  // that covers this path.
+  auto* attr = node->add_attribute();
+  attr->set_name("alpha");
+  attr->set_type(AttributeProto_AttributeType_FLOAT);
+  attr->set_ref_attr_name("alpha");
+
+  // Import: the reference must be represented in the IR, not dropped.
+  std::shared_ptr<Graph> g = ImportModelProto(model_in);
+  ASSERT_TRUE(g != nullptr);
+  Node* imported = nullptr;
+  for (Node* n : g->nodes()) {
+    if (n->kind() == Symbol("LeakyRelu")) {
+      imported = n;
+      break;
+    }
+  }
+  ASSERT_NE(imported, nullptr);
+  const Symbol alpha("alpha");
+  ASSERT_TRUE(imported->hasAttribute(alpha));
+  EXPECT_TRUE(imported->isReference(alpha));
+  EXPECT_EQ(imported->kindOf(alpha), AttributeKind::ref);
+  EXPECT_EQ(imported->refAttrName(alpha), "alpha");
+  EXPECT_EQ(imported->refType(alpha), AttributeProto_AttributeType_FLOAT);
+
+  // Export: ref_attr_name and type survive, with no value field set.
+  ModelProto model_out;
+  ExportModelProto(&model_out, g);
+  ASSERT_EQ(model_out.graph().node_size(), 1);
+  const auto& out_node = model_out.graph().node(0);
+  ASSERT_EQ(out_node.attribute_size(), 1);
+  const auto& out_attr = out_node.attribute(0);
+  EXPECT_EQ(out_attr.name(), "alpha");
+  EXPECT_EQ(out_attr.ref_attr_name(), "alpha");
+  EXPECT_EQ(out_attr.type(), AttributeProto_AttributeType_FLOAT);
+  EXPECT_FALSE(out_attr.has_f());
+}
+
 } // namespace Test
 } // namespace ONNX_NAMESPACE
