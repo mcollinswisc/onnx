@@ -3178,3 +3178,46 @@ class TestVersionConverter:
     def test_celu_28_27_unsupported_type_fails(self, dtype: int) -> None:
         with pytest.raises(RuntimeError):
             self._celu_converted(dtype, 28, 27)
+
+    def test_convert_version_preserves_local_function(self) -> None:
+        """Test that the version converter outputs local functions."""
+        func = helper.make_function(
+            domain="custom",
+            fname="MyFunc",
+            inputs=["x"],
+            outputs=["y"],
+            # The Identity op is unchanged between 17 & 18, so we don't expect
+            # the version converter to change this graph.
+            nodes=[helper.make_node("Identity", ["x"], ["y"])],
+            opset_imports=[helper.make_operatorsetid("", 17)],
+        )
+        call = helper.make_node("MyFunc", ["X"], ["Y"], domain="custom")
+        graph = helper.make_graph(
+            [call],
+            "test_preserve_local_function",
+            [helper.make_tensor_value_info("X", TensorProto.FLOAT, [3])],
+            [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [3])],
+        )
+        model = helper.make_model(
+            graph,
+            opset_imports=[
+                helper.make_operatorsetid("", 17),
+                helper.make_operatorsetid("custom", 1),
+            ],
+            functions=[func],
+        )
+        checker.check_model(model, full_check=True)
+
+        converted = onnx.version_converter.convert_version(model, 18)
+        checker.check_model(converted, full_check=True)
+
+        # The function is preserved (was dropped before the fix) and, in this
+        # stage, carried through byte-for-byte unchanged.
+        assert len(converted.functions) == 1
+        assert converted.functions[0] == func
+
+        opset_by_domain = {
+            opset.domain: opset.version for opset in converted.opset_import
+        }
+        assert opset_by_domain[""] == 18
+        assert opset_by_domain["custom"] == 1

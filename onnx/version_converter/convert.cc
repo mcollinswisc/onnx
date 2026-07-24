@@ -154,6 +154,14 @@ ModelProto DefaultVersionConverter::convert_version(
   debug("Finished conversion; returning model");
   ModelProto mp_out = PrepareOutput(mp_in);
   ExportModelProto(&mp_out, g);
+
+  // Copy over local functions.
+  // TODO: Convert the graph version for the function graphs too. They
+  // are currently copied unchanged. 
+  for (const auto& fp : mp_in.functions()) {
+    *mp_out.add_functions() = fp;
+  }
+
   return mp_out;
 }
 
