@@ -13,6 +13,7 @@ import pytest
 
 import onnx.version_converter
 from onnx import (
+    AttributeProto,
     GraphProto,
     ModelProto,
     OperatorSetIdProto,
@@ -3211,13 +3212,148 @@ class TestVersionConverter:
         converted = onnx.version_converter.convert_version(model, 18)
         checker.check_model(converted, full_check=True)
 
-        # The function is preserved (was dropped before the fix) and, in this
-        # stage, carried through byte-for-byte unchanged.
         assert len(converted.functions) == 1
-        assert converted.functions[0] == func
+        fn = converted.functions[0]
+        assert fn.name == "MyFunc"
+        assert fn.domain == "custom"
+        assert list(fn.node) == list(func.node)
+        assert {o.domain: o.version for o in fn.opset_import}[""] == 18
 
         opset_by_domain = {
             opset.domain: opset.version for opset in converted.opset_import
         }
         assert opset_by_domain[""] == 18
         assert opset_by_domain["custom"] == 1
+
+    def test_convert_version_converts_function_body(self) -> None:
+        """Version converter also converts the graph of a local function."""
+        body = helper.make_node("ReduceSum", ["x"], ["y"], axes=[1], keepdims=1)
+        func = helper.make_function(
+            domain="custom",
+            fname="MyReduce",
+            inputs=["x"],
+            outputs=["y"],
+            nodes=[body],
+            opset_imports=[helper.make_operatorsetid("", 12)],
+        )
+        call = helper.make_node("MyReduce", ["X"], ["Y"], domain="custom")
+        graph = helper.make_graph(
+            [call],
+            "test_convert_function_body",
+            [helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 3])],
+            [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 1])],
+        )
+        model = helper.make_model(
+            graph,
+            opset_imports=[
+                helper.make_operatorsetid("", 12),
+                helper.make_operatorsetid("custom", 1),
+            ],
+            functions=[func],
+        )
+        checker.check_model(model, full_check=True)
+
+        converted = onnx.version_converter.convert_version(model, 13)
+        checker.check_model(converted, full_check=True)
+
+        fn = converted.functions[0]
+        assert {o.domain: o.version for o in fn.opset_import}[""] == 13
+        # ReduceSum moved `axes` from an attribute (opset 12) to an input (opset
+        # 13).
+        assert [n.op_type for n in fn.node] == ["Constant", "ReduceSum"]
+        reduce_node = fn.node[1]
+        assert len(reduce_node.input) == 2  # data + axes
+        assert "axes" not in {a.name for a in reduce_node.attribute}
+
+        # The converted function computes the same result as the original.
+        x = np.arange(6, dtype=np.float32).reshape(2, 3)
+        before = ReferenceEvaluator(model).run(None, {"X": x})
+        after = ReferenceEvaluator(converted).run(None, {"X": x})
+        np.testing.assert_allclose(before[0], after[0])
+
+    def test_convert_version_function_body_initializer_becomes_constant(self) -> None:
+        """Tests handling of initializers created by an adapter.
+
+        Pad 10 -> 11 moves `pads` from an attribute to an input, which the
+        adapter materializes as a graph initializer. A FunctionProto has no
+        initializer field, so it must be relocated into a Constant node.
+        """
+        body = helper.make_node(
+            "Pad", ["x"], ["y"], mode="constant", pads=[0, 1, 0, 1], value=0.0
+        )
+        func = helper.make_function(
+            domain="custom",
+            fname="MyPad",
+            inputs=["x"],
+            outputs=["y"],
+            nodes=[body],
+            opset_imports=[helper.make_operatorsetid("", 10)],
+        )
+        call = helper.make_node("MyPad", ["X"], ["Y"], domain="custom")
+        graph = helper.make_graph(
+            [call],
+            "test_function_body_pad",
+            [helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 2])],
+            [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 4])],
+        )
+        model = helper.make_model(
+            graph,
+            opset_imports=[
+                helper.make_operatorsetid("", 10),
+                helper.make_operatorsetid("custom", 1),
+            ],
+            functions=[func],
+        )
+        checker.check_model(model, full_check=True)
+
+        converted = onnx.version_converter.convert_version(model, 11)
+        checker.check_model(converted, full_check=True)
+
+        fn = converted.functions[0]
+        assert {o.domain: o.version for o in fn.opset_import}[""] == 11
+        # The `pads` input is converted to a Constant node in the body, rather
+        # than an initializer.
+        pad_node = next(n for n in fn.node if n.op_type == "Pad")
+        pads_input = pad_node.input[1]
+        producer = {out: n.op_type for n in fn.node for out in n.output}
+        assert producer[pads_input] == "Constant"
+
+    def test_convert_version_function_body_preserves_reference_attribute(self) -> None:
+        """Tests handling of reference attributes in a local function body."""
+        leaky = helper.make_node("LeakyRelu", ["x"], ["y"])
+        leaky.attribute.append(helper.make_attribute_ref("alpha", AttributeProto.FLOAT))
+        func = helper.make_function(
+            domain="custom",
+            fname="MyLeaky",
+            inputs=["x"],
+            outputs=["y"],
+            nodes=[leaky],
+            opset_imports=[helper.make_operatorsetid("", 15)],
+            attributes=["alpha"],
+        )
+        call = helper.make_node("MyLeaky", ["X"], ["Y"], domain="custom", alpha=0.2)
+        graph = helper.make_graph(
+            [call],
+            "test_function_body_ref_attr",
+            [helper.make_tensor_value_info("X", TensorProto.FLOAT, [3])],
+            [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [3])],
+        )
+        model = helper.make_model(
+            graph,
+            opset_imports=[
+                helper.make_operatorsetid("", 15),
+                helper.make_operatorsetid("custom", 1),
+            ],
+            functions=[func],
+        )
+        checker.check_model(model, full_check=True)
+
+        converted = onnx.version_converter.convert_version(model, 16)
+        checker.check_model(converted, full_check=True)
+
+        fn = converted.functions[0]
+        assert {o.domain: o.version for o in fn.opset_import}[""] == 16
+        attr = fn.node[0].attribute[0]
+        assert attr.name == "alpha"
+        assert attr.ref_attr_name == "alpha"
+        assert not attr.HasField("f")

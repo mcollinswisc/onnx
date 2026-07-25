@@ -6,25 +6,123 @@
 
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
+#include <unordered_map>
 
 #include "onnx/common/ir_pb_converter.h"
 
 namespace ONNX_NAMESPACE {
 namespace version_conversion {
 
+// Return the version of the default-domain ("" or "ai.onnx") opset import, or
+// nullopt if the imports declare no default-domain dependency.
+static std::optional<int64_t> GetDefaultDomainOpsetVersion(
+    const google::protobuf::RepeatedPtrField<OperatorSetIdProto>& opset_import) {
+  for (const auto& opset : opset_import) {
+    if (opset.domain().empty() || opset.domain() == "ai.onnx") {
+      return opset.version();
+    }
+  }
+  return std::nullopt;
+}
+
 ModelProto ConvertVersion(const ModelProto& mp_in, int target_version) {
   // Get initial_opsetid from mp_in
   OpSetID initial_struct(0);
-  for (const auto& it : mp_in.opset_import()) {
-    if (it.domain().empty() || it.domain() == "ai.onnx") {
-      initial_struct.setVersion(it.version());
-      break;
-    }
+  if (const std::optional<int64_t> initial_version = GetDefaultDomainOpsetVersion(mp_in.opset_import())) {
+    initial_struct.setVersion(*initial_version);
   }
   OpSetID target_struct = OpSetID(target_version);
   DefaultVersionConverter v;
   return v.convert_version(mp_in, initial_struct, target_struct);
+}
+
+// Wrap a function body in a single-graph ModelProto so it can be run through the
+// version converter. The function's declared inputs/outputs carry no type of
+// their own; supply types from the function's value_info when available.
+static ModelProto FunctionBodyAsModel(const FunctionProto& fp, int64_t ir_version) {
+  ModelProto model;
+  model.set_ir_version(ir_version);
+  *model.mutable_opset_import() = fp.opset_import();
+  GraphProto* graph = model.mutable_graph();
+  graph->set_name(fp.name());
+
+  std::unordered_map<std::string, const TypeProto*> type_of;
+  for (const auto& vi : fp.value_info()) {
+    if (vi.has_type()) {
+      type_of[vi.name()] = &vi.type();
+    }
+  }
+  for (const auto& name : fp.input()) {
+    ValueInfoProto* vip = graph->add_input();
+    vip->set_name(name);
+    const auto it = type_of.find(name);
+    if (it != type_of.end()) {
+      *vip->mutable_type() = *it->second;
+    }
+  }
+  for (const auto& name : fp.output()) {
+    ValueInfoProto* vip = graph->add_output();
+    vip->set_name(name);
+    const auto it = type_of.find(name);
+    if (it != type_of.end()) {
+      *vip->mutable_type() = *it->second;
+    }
+  }
+  *graph->mutable_value_info() = fp.value_info();
+  *graph->mutable_node() = fp.node();
+  return model;
+}
+
+// Build a Constant node that outputs the given (named) tensor. Used to relocate a
+// graph initializer into a function body, which cannot hold initializers.
+static NodeProto MakeConstantNode(const TensorProto& tensor) {
+  ONNX_ASSERTM(!tensor.name().empty(), "Cannot build a Constant node for an unnamed tensor")
+  NodeProto constant;
+  constant.set_op_type("Constant");
+  constant.set_domain("");
+  constant.add_output(tensor.name());
+  AttributeProto* value = constant.add_attribute();
+  value->set_name("value");
+  value->set_type(AttributeProto_AttributeType_TENSOR);
+  *value->mutable_t() = tensor;
+  value->mutable_t()->clear_name();
+  return constant;
+}
+
+// Convert a local function's body to the target default-domain opset.
+static FunctionProto ConvertFunctionVersion(const FunctionProto& fp_in, int target_version, int64_t ir_version) {
+  const std::optional<int64_t> initial_version = GetDefaultDomainOpsetVersion(fp_in.opset_import());
+  if (!initial_version || *initial_version == target_version) {
+    return fp_in;
+  }
+
+  ModelProto wrapper = FunctionBodyAsModel(fp_in, ir_version);
+  ModelProto converted = ConvertVersion(wrapper, target_version);
+
+  // Rebuild the function from the converted ModelProto.
+  FunctionProto fp_out = fp_in;
+  fp_out.clear_opset_import();
+  *fp_out.mutable_opset_import() = converted.opset_import();
+  fp_out.clear_node();
+
+  // A FunctionProto has no initializer field. Any initializer here was created
+  // by an adapter (e.g. Pad 10->11 moving the pads from an attribute to an
+  // input, creating an initializer for the pads). This loop converts each
+  // into a Constant node.
+  for (const auto& initializer : converted.graph().initializer()) {
+    *fp_out.add_node() = MakeConstantNode(initializer);
+  }
+  // No adapters currently produce a sparse initializer, but in the future they
+  // could also be converted the same way.
+  ONNX_ASSERTM(
+      converted.graph().sparse_initializer().empty(),
+      "Unsupported: sparse initializer produced while converting function body")
+
+  // Append the converted body after any Constants
+  fp_out.mutable_node()->MergeFrom(converted.graph().node());
+  return fp_out;
 }
 
 void DefaultVersionConverter::convert_graph(
@@ -155,11 +253,10 @@ ModelProto DefaultVersionConverter::convert_version(
   ModelProto mp_out = PrepareOutput(mp_in);
   ExportModelProto(&mp_out, g);
 
-  // Copy over local functions.
-  // TODO: Convert the graph version for the function graphs too. They
-  // are currently copied unchanged. 
-  for (const auto& fp : mp_in.functions()) {
-    *mp_out.add_functions() = fp;
+  // Convert local functions.
+  for (const auto& fp_in : mp_in.functions()) {
+    *mp_out.add_functions() =
+        ConvertFunctionVersion(fp_in, static_cast<int>(target_version.version()), mp_in.ir_version());
   }
 
   return mp_out;
