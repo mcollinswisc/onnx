@@ -3360,7 +3360,7 @@ class TestVersionConverter:
 
     def test_convert_version_function_body_shape_dependent_adapter(self) -> None:
         """Test the broadcast 6->7 adapter applied within a function.
-        
+
         This adapter requires shapes to be present, so the use of shape
         inference is covered by this test case.
         """
@@ -3404,3 +3404,345 @@ class TestVersionConverter:
         fn = converted.functions[0]
         assert {o.domain: o.version for o in fn.opset_import}[""] == 8
         assert [n.op_type for n in fn.node] == ["Constant", "Add"]
+
+    def _scan_body(self) -> GraphProto:
+        """Inner Scan body: an accumulator Add plus an Identity scan-output."""
+        add = helper.make_node("Add", ["sum_in", "next_in"], ["sum_out"])
+        idn = helper.make_node("Identity", ["sum_out"], ["scan_out"])
+        return helper.make_graph(
+            [add, idn],
+            "scan_body",
+            [
+                helper.make_tensor_value_info("sum_in", TensorProto.FLOAT, [2]),
+                helper.make_tensor_value_info("next_in", TensorProto.FLOAT, [2]),
+            ],
+            [
+                helper.make_tensor_value_info("sum_out", TensorProto.FLOAT, [2]),
+                helper.make_tensor_value_info("scan_out", TensorProto.FLOAT, [2]),
+            ],
+        )
+
+    def _scan_top_level_reference(
+        self, target: int, initial: np.ndarray, x: np.ndarray
+    ) -> list[np.ndarray]:
+        """Ground-truth output: the same Scan converted at the *top level* (its
+        official converted semantics). The adapter preserves the model
+        interface, so the reference model takes the same batched inputs.
+        """
+        scan = helper.make_node(
+            "Scan",
+            ["", "initial", "x"],
+            ["y", "z"],
+            body=self._scan_body(),
+            num_scan_inputs=1,
+        )
+        graph = helper.make_graph(
+            [scan],
+            "scan_top_level",
+            [
+                helper.make_tensor_value_info("initial", TensorProto.FLOAT, [1, 2]),
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 3, 2]),
+            ],
+            [
+                helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 2]),
+                helper.make_tensor_value_info("z", TensorProto.FLOAT, [1, 3, 2]),
+            ],
+        )
+        model = helper.make_model(
+            graph, opset_imports=[helper.make_operatorsetid("", 8)]
+        )
+        converted = onnx.version_converter.convert_version(model, target)
+        return ReferenceEvaluator(converted).run(None, {"initial": initial, "x": x})
+
+    def test_convert_version_function_body_scan_8_9(self) -> None:
+        """Scan 8->9 removes the leading batch axis from the operator's I/O.
+
+        The adapter squeezes the batch axis away in front of the Scan and
+        restores it behind, so the function keeps its (batched) interface and
+        its call sites remain valid.
+        """
+        scan = helper.make_node(
+            "Scan",
+            ["", "initial", "x"],
+            ["y", "z"],
+            body=self._scan_body(),
+            num_scan_inputs=1,
+        )
+        func = helper.make_function(
+            domain="custom",
+            fname="ScanFn",
+            inputs=["initial", "x"],
+            outputs=["y", "z"],
+            nodes=[scan],
+            opset_imports=[helper.make_operatorsetid("", 8)],
+            value_info=[
+                helper.make_tensor_value_info("initial", TensorProto.FLOAT, [1, 2]),
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 3, 2]),
+                helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 2]),
+                helper.make_tensor_value_info("z", TensorProto.FLOAT, [1, 3, 2]),
+            ],
+        )
+        call = helper.make_node("ScanFn", ["I", "X"], ["Y", "Z"], domain="custom")
+        graph = helper.make_graph(
+            [call],
+            "test_function_body_scan_8_9",
+            [
+                helper.make_tensor_value_info("I", TensorProto.FLOAT, [1, 2]),
+                helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 2]),
+            ],
+            [
+                helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 2]),
+                helper.make_tensor_value_info("Z", TensorProto.FLOAT, [1, 3, 2]),
+            ],
+        )
+        model = helper.make_model(
+            graph,
+            opset_imports=[
+                helper.make_operatorsetid("", 8),
+                helper.make_operatorsetid("custom", 1),
+            ],
+            functions=[func],
+        )
+        checker.check_model(model, full_check=True)
+
+        converted = onnx.version_converter.convert_version(model, 9)
+        checker.check_model(converted, full_check=True)
+
+        fn = converted.functions[0]
+        assert {o.domain: o.version for o in fn.opset_import}[""] == 9
+        # The batch axis is squeezed away around the Scan and restored on its
+        # outputs; the function keeps its original (batched) interface.
+        assert [n.op_type for n in fn.node] == [
+            "Squeeze",
+            "Squeeze",
+            "Scan",
+            "Unsqueeze",
+            "Unsqueeze",
+        ]
+        assert list(fn.input) == ["initial", "x"]
+        assert list(fn.output) == ["y", "z"]
+
+        # The converted function matches the top-level conversion's semantics.
+        initial = np.array([[1.0, 2.0]], dtype=np.float32)
+        x = np.arange(6, dtype=np.float32).reshape(1, 3, 2)
+        expected = self._scan_top_level_reference(9, initial, x)
+        got = ReferenceEvaluator(converted).run(None, {"I": initial, "X": x})
+        np.testing.assert_allclose(got[0], expected[0])
+        np.testing.assert_allclose(got[1], expected[1])
+
+    def test_convert_version_function_body_scan_axes_as_input(self) -> None:
+        """Same as scan_8_9 but converting across opset 13, where Squeeze/Unsqueeze
+        take `axes` as an input rather than an attribute -- the wrap nodes born at
+        8->9 are carried to the target form by the standard Squeeze/Unsqueeze
+        adapters, each receiving its own axes Constant.
+        """
+        scan = helper.make_node(
+            "Scan",
+            ["", "initial", "x"],
+            ["y", "z"],
+            body=self._scan_body(),
+            num_scan_inputs=1,
+        )
+        func = helper.make_function(
+            domain="custom",
+            fname="ScanFn",
+            inputs=["initial", "x"],
+            outputs=["y", "z"],
+            nodes=[scan],
+            opset_imports=[helper.make_operatorsetid("", 8)],
+            value_info=[
+                helper.make_tensor_value_info("initial", TensorProto.FLOAT, [1, 2]),
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 3, 2]),
+                helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 2]),
+                helper.make_tensor_value_info("z", TensorProto.FLOAT, [1, 3, 2]),
+            ],
+        )
+        call = helper.make_node("ScanFn", ["I", "X"], ["Y", "Z"], domain="custom")
+        graph = helper.make_graph(
+            [call],
+            "test_function_body_scan_axes_as_input",
+            [
+                helper.make_tensor_value_info("I", TensorProto.FLOAT, [1, 2]),
+                helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 2]),
+            ],
+            [
+                helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 2]),
+                helper.make_tensor_value_info("Z", TensorProto.FLOAT, [1, 3, 2]),
+            ],
+        )
+        model = helper.make_model(
+            graph,
+            opset_imports=[
+                helper.make_operatorsetid("", 8),
+                helper.make_operatorsetid("custom", 1),
+            ],
+            functions=[func],
+        )
+        checker.check_model(model, full_check=True)
+
+        converted = onnx.version_converter.convert_version(model, 13)
+        checker.check_model(converted, full_check=True)
+
+        fn = converted.functions[0]
+        assert {o.domain: o.version for o in fn.opset_import}[""] == 13
+        # The 12->13 Squeeze/Unsqueeze adapter gives each wrap node its own
+        # axes Constant.
+        assert [n.op_type for n in fn.node] == [
+            "Constant",
+            "Squeeze",
+            "Constant",
+            "Squeeze",
+            "Scan",
+            "Constant",
+            "Unsqueeze",
+            "Constant",
+            "Unsqueeze",
+        ]
+        squeeze = fn.node[1]
+        assert len(squeeze.input) == 2  # data + axes input
+        assert "axes" not in {a.name for a in squeeze.attribute}
+
+        initial = np.array([[3.0, -1.0]], dtype=np.float32)
+        x = np.arange(6, dtype=np.float32).reshape(1, 3, 2)
+        expected = self._scan_top_level_reference(13, initial, x)
+        got = ReferenceEvaluator(converted).run(None, {"I": initial, "X": x})
+        np.testing.assert_allclose(got[0], expected[0])
+        np.testing.assert_allclose(got[1], expected[1])
+
+    def test_convert_version_function_body_scan_9_8(self) -> None:
+        """Scan 9->8 prepends a batch axis to the operator's I/O; the adapter
+        preserves the function's unbatched interface by wrapping with
+        Unsqueeze (in) / Squeeze (out).
+        """
+        scan = helper.make_node(
+            "Scan",
+            ["initial", "x"],
+            ["y", "z"],
+            body=self._scan_body(),
+            num_scan_inputs=1,
+        )
+        func = helper.make_function(
+            domain="custom",
+            fname="ScanFn",
+            inputs=["initial", "x"],
+            outputs=["y", "z"],
+            nodes=[scan],
+            opset_imports=[helper.make_operatorsetid("", 9)],
+            value_info=[
+                helper.make_tensor_value_info("initial", TensorProto.FLOAT, [2]),
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, [3, 2]),
+                helper.make_tensor_value_info("y", TensorProto.FLOAT, [2]),
+                helper.make_tensor_value_info("z", TensorProto.FLOAT, [3, 2]),
+            ],
+        )
+        call = helper.make_node("ScanFn", ["I", "X"], ["Y", "Z"], domain="custom")
+        graph = helper.make_graph(
+            [call],
+            "test_function_body_scan_9_8",
+            [
+                helper.make_tensor_value_info("I", TensorProto.FLOAT, [2]),
+                helper.make_tensor_value_info("X", TensorProto.FLOAT, [3, 2]),
+            ],
+            [
+                helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2]),
+                helper.make_tensor_value_info("Z", TensorProto.FLOAT, [3, 2]),
+            ],
+        )
+        model = helper.make_model(
+            graph,
+            opset_imports=[
+                helper.make_operatorsetid("", 9),
+                helper.make_operatorsetid("custom", 1),
+            ],
+            functions=[func],
+        )
+        checker.check_model(model, full_check=True)
+
+        converted = onnx.version_converter.convert_version(model, 8)
+        checker.check_model(converted, full_check=True)
+
+        fn = converted.functions[0]
+        assert {o.domain: o.version for o in fn.opset_import}[""] == 8
+        assert [n.op_type for n in fn.node] == [
+            "Unsqueeze",
+            "Unsqueeze",
+            "Scan",
+            "Squeeze",
+            "Squeeze",
+        ]
+        assert list(fn.input) == ["initial", "x"]
+        assert list(fn.output) == ["y", "z"]
+
+    def test_convert_version_function_body_scan_output_feeds_another_op(self) -> None:
+        """A Scan output consumed by another op inside the body: the adapter's
+        wrap keeps every surrounding value at its original rank, so neither the
+        downstream op nor the function interface is affected.
+        """
+        scan = helper.make_node(
+            "Scan",
+            ["", "initial", "x"],
+            ["y", "zc"],
+            body=self._scan_body(),
+            num_scan_inputs=1,
+        )
+        relu = helper.make_node("Relu", ["zc"], ["z"])
+        func = helper.make_function(
+            domain="custom",
+            fname="ScanFn",
+            inputs=["initial", "x"],
+            outputs=["y", "z"],
+            nodes=[scan, relu],
+            opset_imports=[helper.make_operatorsetid("", 8)],
+            value_info=[
+                helper.make_tensor_value_info("initial", TensorProto.FLOAT, [1, 2]),
+                helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 3, 2]),
+                helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 2]),
+                helper.make_tensor_value_info("zc", TensorProto.FLOAT, [1, 3, 2]),
+                helper.make_tensor_value_info("z", TensorProto.FLOAT, [1, 3, 2]),
+            ],
+        )
+        call = helper.make_node("ScanFn", ["I", "X"], ["Y", "Z"], domain="custom")
+        graph = helper.make_graph(
+            [call],
+            "test_function_body_scan_output_feeds_another_op",
+            [
+                helper.make_tensor_value_info("I", TensorProto.FLOAT, [1, 2]),
+                helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 2]),
+            ],
+            [
+                helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 2]),
+                helper.make_tensor_value_info("Z", TensorProto.FLOAT, [1, 3, 2]),
+            ],
+        )
+        model = helper.make_model(
+            graph,
+            opset_imports=[
+                helper.make_operatorsetid("", 8),
+                helper.make_operatorsetid("custom", 1),
+            ],
+            functions=[func],
+        )
+        checker.check_model(model, full_check=True)
+
+        converted = onnx.version_converter.convert_version(model, 9)
+        checker.check_model(converted, full_check=True)
+
+        fn = converted.functions[0]
+        assert {o.domain: o.version for o in fn.opset_import}[""] == 9
+        assert [n.op_type for n in fn.node] == [
+            "Squeeze",
+            "Squeeze",
+            "Scan",
+            "Unsqueeze",
+            "Unsqueeze",
+            "Relu",
+        ]
+        assert list(fn.input) == ["initial", "x"]
+        assert list(fn.output) == ["y", "z"]
+
+        initial = np.array([[-4.0, 2.0]], dtype=np.float32)
+        x = np.arange(6, dtype=np.float32).reshape(1, 3, 2)
+        expected = self._scan_top_level_reference(9, initial, x)
+        got = ReferenceEvaluator(converted).run(None, {"I": initial, "X": x})
+        np.testing.assert_allclose(got[0], expected[0])
+        np.testing.assert_allclose(got[1], np.maximum(expected[1], 0.0))

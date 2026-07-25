@@ -92,6 +92,52 @@ static NodeProto MakeConstantNode(const TensorProto& tensor) {
   return constant;
 }
 
+// Rank of the tensor type declared on a graph input/output, or -1 if it
+// carries no tensor shape.
+static int TensorTypeRank(const ValueInfoProto& value_info) {
+  if (!value_info.has_type() || !value_info.type().has_tensor_type() || !value_info.type().tensor_type().has_shape()) {
+    return -1;
+  }
+  return value_info.type().tensor_type().shape().dim_size();
+}
+
+// Adapters keep a conversion local to their node (e.g. Scan_8_9 squeezes the
+// batch axis away around the converted Scan instead of re-ranking the values
+// surrounding it), so converting a function body must leave the function's
+// formal interface -- and therefore its call sites -- unchanged. Verify that,
+// refusing loudly if an adapter breaks the invariant, rather than emit a
+// function that no longer matches its callers.
+static void AssertInterfacePreserved(
+    const std::string& function_name,
+    int target_version,
+    const google::protobuf::RepeatedPtrField<ValueInfoProto>& before,
+    const google::protobuf::RepeatedPtrField<ValueInfoProto>& after) {
+  ONNX_ASSERTM(
+      before.size() == after.size(),
+      "Cannot convert function '",
+      function_name,
+      "' to opset ",
+      target_version,
+      ": conversion changed the number of formal inputs/outputs")
+  for (int i = 0; i < before.size(); ++i) {
+    const int rank_before = TensorTypeRank(before.Get(i));
+    const int rank_after = TensorTypeRank(after.Get(i));
+    ONNX_ASSERTM(
+        rank_before < 0 || rank_after < 0 || rank_before == rank_after,
+        "Cannot convert function '",
+        function_name,
+        "' to opset ",
+        target_version,
+        ": conversion would change the rank of '",
+        before.Get(i).name(),
+        "' from ",
+        rank_before,
+        " to ",
+        rank_after,
+        ", which cannot be expressed on the function's interface")
+  }
+}
+
 // Convert a local function's body to the target default-domain opset.
 static FunctionProto ConvertFunctionVersion(const FunctionProto& fp_in, int target_version, int64_t ir_version) {
   const std::optional<int64_t> initial_version = GetDefaultDomainOpsetVersion(fp_in.opset_import());
@@ -108,6 +154,8 @@ static FunctionProto ConvertFunctionVersion(const FunctionProto& fp_in, int targ
   shape_inference::InferShapes(wrapper);
 
   ModelProto converted = ConvertVersion(wrapper, target_version);
+  AssertInterfacePreserved(fp_in.name(), target_version, wrapper.graph().input(), converted.graph().input());
+  AssertInterfacePreserved(fp_in.name(), target_version, wrapper.graph().output(), converted.graph().output());
 
   // Rebuild the function from the converted ModelProto.
   FunctionProto fp_out = fp_in;
@@ -130,6 +178,7 @@ static FunctionProto ConvertFunctionVersion(const FunctionProto& fp_in, int targ
 
   // Append the converted body after any Constants
   fp_out.mutable_node()->MergeFrom(converted.graph().node());
+
   return fp_out;
 }
 
