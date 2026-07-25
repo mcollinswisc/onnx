@@ -3357,3 +3357,50 @@ class TestVersionConverter:
         assert attr.name == "alpha"
         assert attr.ref_attr_name == "alpha"
         assert not attr.HasField("f")
+
+    def test_convert_version_function_body_shape_dependent_adapter(self) -> None:
+        """Test the broadcast 6->7 adapter applied within a function.
+        
+        This adapter requires shapes to be present, so the use of shape
+        inference is covered by this test case.
+        """
+        const = helper.make_node(
+            "Constant",
+            [],
+            ["c"],
+            value=helper.make_tensor("one", TensorProto.FLOAT, [1], [1.0]),
+        )
+        add = helper.make_node("Add", ["x", "c"], ["y"])
+        func = helper.make_function(
+            domain="custom",
+            fname="AddConst",
+            inputs=["x"],
+            outputs=["y"],
+            nodes=[const, add],
+            opset_imports=[helper.make_operatorsetid("", 6)],
+            value_info=[helper.make_tensor_value_info("x", TensorProto.FLOAT, [2])],
+        )
+        call = helper.make_node("AddConst", ["X"], ["Y"], domain="custom")
+        graph = helper.make_graph(
+            [call],
+            "test_function_body_shape_dependent_adapter",
+            [helper.make_tensor_value_info("X", TensorProto.FLOAT, [2])],
+            [helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2])],
+        )
+        model = helper.make_model(
+            graph,
+            opset_imports=[
+                helper.make_operatorsetid("", 6),
+                helper.make_operatorsetid("custom", 1),
+            ],
+            functions=[func],
+        )
+        checker.check_model(model, full_check=True)
+
+        # Crosses the broadcast 6->7 boundary; the Add adapter needs `c`'s shape.
+        converted = onnx.version_converter.convert_version(model, 8)
+        checker.check_model(converted, full_check=True)
+
+        fn = converted.functions[0]
+        assert {o.domain: o.version for o in fn.opset_import}[""] == 8
+        assert [n.op_type for n in fn.node] == ["Constant", "Add"]

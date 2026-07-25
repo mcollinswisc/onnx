@@ -11,6 +11,7 @@
 #include <unordered_map>
 
 #include "onnx/common/ir_pb_converter.h"
+#include "onnx/shape_inference/implementation.h"
 
 namespace ONNX_NAMESPACE {
 namespace version_conversion {
@@ -99,6 +100,13 @@ static FunctionProto ConvertFunctionVersion(const FunctionProto& fp_in, int targ
   }
 
   ModelProto wrapper = FunctionBodyAsModel(fp_in, ir_version);
+
+  // Some adapters (e.g. the broadcast 6->7) require operand shapes to be
+  // present. For the main graph, the version converter relies on the shape
+  // inference pass that the Python entry point runs, but that pass does
+  // not descend into function bodies, so it's done here.
+  shape_inference::InferShapes(wrapper);
+
   ModelProto converted = ConvertVersion(wrapper, target_version);
 
   // Rebuild the function from the converted ModelProto.
