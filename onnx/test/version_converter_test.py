@@ -21,6 +21,7 @@ from onnx import (
     helper,
     shape_inference,
 )
+from onnx.reference import ReferenceEvaluator
 
 
 class TestVersionConverter:
@@ -1533,8 +1534,33 @@ class TestVersionConverter:
             graph, helper.make_operatorsetid("", from_opset), to_opset
         )
 
-        assert converted_model.graph.node[0].op_type == "Scan"
+        # The batch axis (of size 1) that opset 9 removed is squeezed away in
+        # front of the Scan and restored behind it, so the model keeps its
+        # interface: callers still supply and receive batched tensors.
+        assert [n.op_type for n in converted_model.graph.node] == [
+            "Squeeze",
+            "Squeeze",
+            "Scan",
+            "Unsqueeze",
+            "Unsqueeze",
+        ]
         assert converted_model.opset_import[0].version == to_opset
+        for value_info, dims in [
+            (converted_model.graph.input[0], [1, 2]),
+            (converted_model.graph.input[1], [1, 3, 2]),
+            (converted_model.graph.output[0], [1, 2]),
+            (converted_model.graph.output[1], [1, 3, 2]),
+        ]:
+            assert [d.dim_value for d in value_info.type.tensor_type.shape.dim] == dims
+        checker.check_model(converted_model, full_check=True)
+
+        initial_data = np.array([[3.0, -1.0]], dtype=np.float32)
+        x_data = np.arange(6, dtype=np.float32).reshape(1, 3, 2)
+        y_data, z_data = ReferenceEvaluator(converted_model).run(
+            None, {"initial": initial_data, "x": x_data}
+        )
+        np.testing.assert_allclose(y_data, initial_data + x_data.sum(axis=1))
+        np.testing.assert_allclose(z_data, initial_data + x_data.cumsum(axis=1))
 
     # Test Cast Adapter: 8 -> 9
     def test_cast_8_9(self) -> None:
@@ -2962,44 +2988,107 @@ class TestVersionConverter:
             ],
         )
         converted_model = self._converted(graph, helper.make_operatorsetid("", 9), 8)
-        assert converted_model.graph.node[0].op_type == "Scan"
+        # The batch axis (of size 1) that opset 8 requires is unsqueezed onto
+        # the inputs in front of the Scan and squeezed away behind it, so the
+        # model keeps its unbatched interface.
+        assert [n.op_type for n in converted_model.graph.node] == [
+            "Unsqueeze",
+            "Unsqueeze",
+            "Scan",
+            "Squeeze",
+            "Squeeze",
+        ]
         assert converted_model.opset_import[0].version == 8
+        for value_info, dims in [
+            (converted_model.graph.input[0], [2]),
+            (converted_model.graph.input[1], [3, 2]),
+            (converted_model.graph.output[0], [2]),
+            (converted_model.graph.output[1], [3, 2]),
+        ]:
+            assert [d.dim_value for d in value_info.type.tensor_type.shape.dim] == dims
+        checker.check_model(converted_model, full_check=True)
 
-    def test_scan_8_9_preserves_unshaped_input(self) -> None:
-        """Scan 8 -> 9 removes the batch axis from each input.
-
-        An input whose shape is unknown must still be kept, and will be
-        unedited (the shape is unknown with or without batch axis). Only the
-        sequence_lens input should be removed.
-        """
+    def test_scan_8_9_rejects_static_batch_size_above_one(self) -> None:
+        # Scan in opset 9 has no batch dimension: a Scan whose batch_size is
+        # statically known to exceed 1 must be refused with a clear error, not
+        # silently converted to a model that misreads the data.
         data_type = TensorProto.FLOAT
+        node1 = helper.make_node("Add", inputs=["sum_in", "next"], outputs=["sum_out"])
+        node2 = helper.make_node("Identity", inputs=["sum_out"], outputs=["scan_out"])
         body = helper.make_graph(
-            [
-                helper.make_node("Add", ["sum_in", "next_in"], ["sum_out"]),
-                helper.make_node("Identity", ["sum_out"], ["scan_out"]),
-            ],
+            [node1, node2],
             "scan_body",
             [
                 helper.make_tensor_value_info("sum_in", data_type, [2]),
-                helper.make_tensor_value_info("next_in", data_type, [2]),
+                helper.make_tensor_value_info("next", data_type, [2]),
             ],
             [
                 helper.make_tensor_value_info("sum_out", data_type, [2]),
                 helper.make_tensor_value_info("scan_out", data_type, [2]),
             ],
         )
-        # A custom op produces `x` with no inferable shape, so it reaches the
-        # Scan 8 -> 9 with no shape.
-        my_op = helper.make_node("MyOp", ["raw"], ["x"], domain="my.domain")
-        scan = helper.make_node(
-            "Scan", ["", "initial", "x"], ["y", "z"], body=body, num_scan_inputs=1
-        )
+        nodes = [
+            helper.make_node(
+                "Scan",
+                inputs=["", "initial", "x"],
+                outputs=["y", "z"],
+                body=body,
+                num_scan_inputs=1,
+            )
+        ]
         graph = helper.make_graph(
-            [my_op, scan],
-            "test_scan_8_9_unshaped_input",
+            nodes,
+            "test_scan_8_9_batch_2",
             [
+                helper.make_tensor_value_info("initial", data_type, [2, 2]),
+                helper.make_tensor_value_info("x", data_type, [2, 3, 2]),
+            ],
+            [
+                helper.make_tensor_value_info("y", data_type, [2, 2]),
+                helper.make_tensor_value_info("z", data_type, [2, 3, 2]),
+            ],
+        )
+        model = helper.make_model(
+            graph, opset_imports=[helper.make_operatorsetid("", 8)]
+        )
+        with pytest.raises(RuntimeError, match="batch_size"):
+            onnx.version_converter.convert_version(model, 9)
+
+    def test_scan_8_9_preserves_input_with_no_shape(self) -> None:
+        # A Scan input with no statically-known shape (here produced by a
+        # custom-domain op that shape inference cannot see through) must be
+        # wrapped and kept like any other input, not dropped.
+        data_type = TensorProto.FLOAT
+        node1 = helper.make_node("Add", inputs=["sum_in", "next"], outputs=["sum_out"])
+        node2 = helper.make_node("Identity", inputs=["sum_out"], outputs=["scan_out"])
+        body = helper.make_graph(
+            [node1, node2],
+            "scan_body",
+            [
+                helper.make_tensor_value_info("sum_in", data_type, [2]),
+                helper.make_tensor_value_info("next", data_type, [2]),
+            ],
+            [
+                helper.make_tensor_value_info("sum_out", data_type, [2]),
+                helper.make_tensor_value_info("scan_out", data_type, [2]),
+            ],
+        )
+        nodes = [
+            helper.make_node("MyOp", inputs=["a"], outputs=["x"], domain="my.domain"),
+            helper.make_node(
+                "Scan",
+                inputs=["", "initial", "x"],
+                outputs=["y", "z"],
+                body=body,
+                num_scan_inputs=1,
+            ),
+        ]
+        graph = helper.make_graph(
+            nodes,
+            "test_scan_8_9_no_shape",
+            [
+                helper.make_tensor_value_info("a", data_type, [1, 3, 2]),
                 helper.make_tensor_value_info("initial", data_type, [1, 2]),
-                helper.make_tensor_value_info("raw", data_type, [1, 3, 2]),
             ],
             [
                 helper.make_tensor_value_info("y", data_type, [1, 2]),
@@ -3015,12 +3104,19 @@ class TestVersionConverter:
         )
         checker.check_model(model)
 
-        converted = onnx.version_converter.convert_version(model, 9)
-        checker.check_model(converted, full_check=True)
-
-        scan_node = next(n for n in converted.graph.node if n.op_type == "Scan")
-        # The empty sequence_lens is removed, but the unshaped scan input is kept.
-        assert list(scan_node.input) == ["initial", "x"]
+        converted_model = onnx.version_converter.convert_version(model, 9)
+        assert [n.op_type for n in converted_model.graph.node] == [
+            "MyOp",
+            "Squeeze",
+            "Squeeze",
+            "Scan",
+            "Unsqueeze",
+            "Unsqueeze",
+        ]
+        scan_node = converted_model.graph.node[3]
+        assert len(scan_node.input) == 2
+        assert all(scan_node.input)
+        checker.check_model(converted_model, full_check=True)
 
     def test_convert_version_ai_onnx_domain_spelling_preserves_custom_domain(
         self,
