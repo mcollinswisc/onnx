@@ -205,6 +205,58 @@ class ReduceMax(Base):
         )
 
     @staticmethod
+    def export_int16_inputs() -> None:
+        axes = np.array([1], dtype=np.int64)
+        keepdims = 1
+
+        node = onnx.helper.make_node(
+            "ReduceMax",
+            inputs=["data", "axes"],
+            outputs=["reduced"],
+            keepdims=keepdims,
+        )
+
+        # Spans the full int16 range, including values that do not fit in int8.
+        data = np.array([[-32768, 300], [1000, 32767]], dtype=np.int16)
+        reduced = np.maximum.reduce(data, axis=tuple(axes), keepdims=bool(keepdims))
+        # print(reduced)
+        # [[  300],
+        #  [32767]]
+
+        expect(
+            node,
+            inputs=[data, axes],
+            outputs=[reduced],
+            name="test_reduce_max_int16_inputs",
+        )
+
+    @staticmethod
+    def export_uint16_inputs() -> None:
+        axes = np.array([1], dtype=np.int64)
+        keepdims = 1
+
+        node = onnx.helper.make_node(
+            "ReduceMax",
+            inputs=["data", "axes"],
+            outputs=["reduced"],
+            keepdims=keepdims,
+        )
+
+        # Spans the full uint16 range, including values that do not fit in uint8.
+        data = np.array([[0, 300], [65535, 1000]], dtype=np.uint16)
+        reduced = np.maximum.reduce(data, axis=tuple(axes), keepdims=bool(keepdims))
+        # print(reduced)
+        # [[  300],
+        #  [65535]]
+
+        expect(
+            node,
+            inputs=[data, axes],
+            outputs=[reduced],
+            name="test_reduce_max_uint16_inputs",
+        )
+
+    @staticmethod
     def export_empty_set() -> None:
         shape = [2, 0, 4]
         keepdims = 1

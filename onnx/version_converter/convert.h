@@ -982,12 +982,21 @@ class DefaultVersionConverter : public BaseVersionConverter {
 
     /******** 27 -> 28 ********/
     registerAdapter(std::make_unique<CompatibleAdapter>("Celu", OpSetID(27), OpSetID(28)));
+    registerAdapter(std::make_unique<CompatibleAdapter>("ReduceMax", OpSetID(27), OpSetID(28)));
+    registerAdapter(std::make_unique<CompatibleAdapter>("ReduceMin", OpSetID(27), OpSetID(28)));
 
     /******** 28 -> 27 ********/
     // Celu v28 widened T to all_float_types_ir4(); Celu v12 (opset 27) supports only FLOAT.
     const std::vector<TensorProto_DataType> celu_28_unallowed_types = {
         TensorProto_DataType_FLOAT16, TensorProto_DataType_BFLOAT16, TensorProto_DataType_DOUBLE};
     registerAdapter(std::make_unique<TypeRestriction>("Celu", OpSetID(28), OpSetID(27), celu_28_unallowed_types));
+    // ReduceMin/ReduceMax v28 widened T with the 16-bit integers; v20 (opset 27) has every other width.
+    const std::vector<TensorProto_DataType> reduce_min_max_28_unallowed_types = {
+        TensorProto_DataType_INT16, TensorProto_DataType_UINT16};
+    registerAdapter(
+        std::make_unique<TypeRestriction>("ReduceMax", OpSetID(28), OpSetID(27), reduce_min_max_28_unallowed_types));
+    registerAdapter(
+        std::make_unique<TypeRestriction>("ReduceMin", OpSetID(28), OpSetID(27), reduce_min_max_28_unallowed_types));
   }
 
   ModelProto convert_version(const ModelProto& mp_in, const OpSetID& initial_version, const OpSetID& target_version)

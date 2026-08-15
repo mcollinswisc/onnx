@@ -3214,3 +3214,43 @@ class TestVersionConverter:
     def test_celu_28_27_unsupported_type_fails(self, dtype: int) -> None:
         with pytest.raises(RuntimeError):
             self._celu_converted(dtype, 28, 27)
+
+    def _reduce_min_max_converted(
+        self, op: str, dtype: int, src: int, dst: int
+    ) -> ModelProto:
+        node = helper.make_node(op, ["data", "axes"], ["reduced"], keepdims=0)
+        graph = helper.make_graph(
+            [node],
+            "reduce_min_max",
+            [
+                helper.make_tensor_value_info("data", dtype, [3, 4]),
+                helper.make_tensor_value_info("axes", TensorProto.INT64, [1]),
+            ],
+            [helper.make_tensor_value_info("reduced", dtype, [3])],
+        )
+        return self._converted(graph, helper.make_operatorsetid("", src), dst)
+
+    @pytest.mark.parametrize("op", ["ReduceMax", "ReduceMin"])
+    def test_reduce_min_max_int32_27_28_and_28_27(self, op: str) -> None:
+        assert (
+            self._reduce_min_max_converted(op, TensorProto.INT32, 27, 28)
+            .opset_import[0]
+            .version
+            == 28
+        )
+        assert (
+            self._reduce_min_max_converted(op, TensorProto.INT32, 28, 27)
+            .opset_import[0]
+            .version
+            == 27
+        )
+
+    # ReduceMin/ReduceMax 28 -> 27: the 16-bit integers added in v28 must be
+    # rejected rather than silently narrowed to another width.
+    @pytest.mark.parametrize("op", ["ReduceMax", "ReduceMin"])
+    @pytest.mark.parametrize("dtype", [TensorProto.INT16, TensorProto.UINT16])
+    def test_reduce_min_max_28_27_unsupported_type_fails(
+        self, op: str, dtype: int
+    ) -> None:
+        with pytest.raises(RuntimeError):
+            self._reduce_min_max_converted(op, dtype, 28, 27)

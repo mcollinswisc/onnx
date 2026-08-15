@@ -113,6 +113,24 @@ class TestAutomaticDowngrade(automatic_conversion_test_base.TestAutomaticConvers
         """,
         )
 
+    @pytest.mark.parametrize("op", ["ReduceMax", "ReduceMin"])
+    @pytest.mark.parametrize("dtype", ["int16", "uint16"])
+    def test_ReduceMinMax_16bit_downgrade_fails(self, op: str, dtype: str) -> None:
+        # ReduceMin/ReduceMax gained the 16-bit integers at opset 28. Downgrading
+        # one below that must be rejected, not silently reinterpreted at another
+        # width.
+        self._test_model_conversion_fails(
+            to_opset=27,
+            model=f"""
+            <ir_version: 10, opset_import: [ "" : 28]>
+            reduce_min_max ({dtype}[2, 3] data) => ({dtype}[2] reduced)
+            {{
+                axes = Constant <value = int64[1] {{1}}>()
+                reduced = {op} <keepdims = 0> (data, axes)
+            }}
+        """,
+        )
+
     def test_CausalConvWithState_downgrade_fails(self) -> None:
         # CausalConvWithState was introduced at opset 27; no decomposition
         # adapter exists for downgrading to opset 24. The version converter

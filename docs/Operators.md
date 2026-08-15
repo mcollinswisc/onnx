@@ -116,9 +116,9 @@ For an operator input/output's differentiability, it can be differentiable,
 |<a href="#RandomUniform">RandomUniform</a>|<a href="Changelog.md#RandomUniform-22">22</a>, <a href="Changelog.md#RandomUniform-1">1</a>|
 |<a href="#RandomUniformLike">RandomUniformLike</a>|<a href="Changelog.md#RandomUniformLike-22">22</a>, <a href="Changelog.md#RandomUniformLike-1">1</a>|
 |<a href="#Reciprocal">Reciprocal</a>|<a href="Changelog.md#Reciprocal-13">13</a>, <a href="Changelog.md#Reciprocal-6">6</a>, <a href="Changelog.md#Reciprocal-1">1</a>|
-|<a href="#ReduceMax">ReduceMax</a>|<a href="Changelog.md#ReduceMax-20">20</a>, <a href="Changelog.md#ReduceMax-18">18</a>, <a href="Changelog.md#ReduceMax-13">13</a>, <a href="Changelog.md#ReduceMax-12">12</a>, <a href="Changelog.md#ReduceMax-11">11</a>, <a href="Changelog.md#ReduceMax-1">1</a>|
+|<a href="#ReduceMax">ReduceMax</a>|<a href="Changelog.md#ReduceMax-28">28</a>, <a href="Changelog.md#ReduceMax-20">20</a>, <a href="Changelog.md#ReduceMax-18">18</a>, <a href="Changelog.md#ReduceMax-13">13</a>, <a href="Changelog.md#ReduceMax-12">12</a>, <a href="Changelog.md#ReduceMax-11">11</a>, <a href="Changelog.md#ReduceMax-1">1</a>|
 |<a href="#ReduceMean">ReduceMean</a>|<a href="Changelog.md#ReduceMean-18">18</a>, <a href="Changelog.md#ReduceMean-13">13</a>, <a href="Changelog.md#ReduceMean-11">11</a>, <a href="Changelog.md#ReduceMean-1">1</a>|
-|<a href="#ReduceMin">ReduceMin</a>|<a href="Changelog.md#ReduceMin-20">20</a>, <a href="Changelog.md#ReduceMin-18">18</a>, <a href="Changelog.md#ReduceMin-13">13</a>, <a href="Changelog.md#ReduceMin-12">12</a>, <a href="Changelog.md#ReduceMin-11">11</a>, <a href="Changelog.md#ReduceMin-1">1</a>|
+|<a href="#ReduceMin">ReduceMin</a>|<a href="Changelog.md#ReduceMin-28">28</a>, <a href="Changelog.md#ReduceMin-20">20</a>, <a href="Changelog.md#ReduceMin-18">18</a>, <a href="Changelog.md#ReduceMin-13">13</a>, <a href="Changelog.md#ReduceMin-12">12</a>, <a href="Changelog.md#ReduceMin-11">11</a>, <a href="Changelog.md#ReduceMin-1">1</a>|
 |<a href="#ReduceProd">ReduceProd</a>|<a href="Changelog.md#ReduceProd-18">18</a>, <a href="Changelog.md#ReduceProd-13">13</a>, <a href="Changelog.md#ReduceProd-11">11</a>, <a href="Changelog.md#ReduceProd-1">1</a>|
 |<a href="#ReduceSum">ReduceSum</a>|<a href="Changelog.md#ReduceSum-13">13</a>, <a href="Changelog.md#ReduceSum-11">11</a>, <a href="Changelog.md#ReduceSum-1">1</a>|
 |<a href="#RegexFullMatch">RegexFullMatch</a>|<a href="Changelog.md#RegexFullMatch-20">20</a>|
@@ -29071,9 +29071,9 @@ expect(
 
 #### Version
 
-This version of the operator has been available since version 20 of the default ONNX operator set.
+This version of the operator has been available since version 28 of the default ONNX operator set.
 
-Other versions of this operator: <a href="Changelog.md#ReduceMax-1">1</a>, <a href="Changelog.md#ReduceMax-11">11</a>, <a href="Changelog.md#ReduceMax-12">12</a>, <a href="Changelog.md#ReduceMax-13">13</a>, <a href="Changelog.md#ReduceMax-18">18</a>
+Other versions of this operator: <a href="Changelog.md#ReduceMax-1">1</a>, <a href="Changelog.md#ReduceMax-11">11</a>, <a href="Changelog.md#ReduceMax-12">12</a>, <a href="Changelog.md#ReduceMax-13">13</a>, <a href="Changelog.md#ReduceMax-18">18</a>, <a href="Changelog.md#ReduceMax-20">20</a>
 
 #### Attributes
 
@@ -29103,7 +29103,7 @@ Other versions of this operator: <a href="Changelog.md#ReduceMax-1">1</a>, <a hr
 #### Type Constraints
 
 <dl>
-<dt><tt>T</tt> : tensor(uint32), tensor(uint64), tensor(int32), tensor(int64), tensor(float16), tensor(float), tensor(double), tensor(bfloat16), tensor(uint8), tensor(int8), tensor(bool)</dt>
+<dt><tt>T</tt> : tensor(uint8), tensor(uint16), tensor(uint32), tensor(uint64), tensor(int8), tensor(int16), tensor(int32), tensor(int64), tensor(float16), tensor(float), tensor(double), tensor(bfloat16), tensor(bool)</dt>
 <dd>Constrain input and output types to numeric and Boolean tensors.</dd>
 </dl>
 
@@ -29268,6 +29268,38 @@ expect(
 
 
 <details>
+<summary>int16_inputs</summary>
+
+```python
+axes = np.array([1], dtype=np.int64)
+keepdims = 1
+
+node = onnx.helper.make_node(
+    "ReduceMax",
+    inputs=["data", "axes"],
+    outputs=["reduced"],
+    keepdims=keepdims,
+)
+
+# Spans the full int16 range, including values that do not fit in int8.
+data = np.array([[-32768, 300], [1000, 32767]], dtype=np.int16)
+reduced = np.maximum.reduce(data, axis=tuple(axes), keepdims=bool(keepdims))
+# print(reduced)
+# [[  300],
+#  [32767]]
+
+expect(
+    node,
+    inputs=[data, axes],
+    outputs=[reduced],
+    name="test_reduce_max_int16_inputs",
+)
+```
+
+</details>
+
+
+<details>
 <summary>keepdims</summary>
 
 ```python
@@ -29359,6 +29391,38 @@ expect(
     outputs=[reduced],
     name="test_reduce_max_negative_axes_keepdims_random",
     opset_imports=[onnx.helper.make_opsetid("", 18)],
+)
+```
+
+</details>
+
+
+<details>
+<summary>uint16_inputs</summary>
+
+```python
+axes = np.array([1], dtype=np.int64)
+keepdims = 1
+
+node = onnx.helper.make_node(
+    "ReduceMax",
+    inputs=["data", "axes"],
+    outputs=["reduced"],
+    keepdims=keepdims,
+)
+
+# Spans the full uint16 range, including values that do not fit in uint8.
+data = np.array([[0, 300], [65535, 1000]], dtype=np.uint16)
+reduced = np.maximum.reduce(data, axis=tuple(axes), keepdims=bool(keepdims))
+# print(reduced)
+# [[  300],
+#  [65535]]
+
+expect(
+    node,
+    inputs=[data, axes],
+    outputs=[reduced],
+    name="test_reduce_max_uint16_inputs",
 )
 ```
 
@@ -29618,9 +29682,9 @@ expect(
 
 #### Version
 
-This version of the operator has been available since version 20 of the default ONNX operator set.
+This version of the operator has been available since version 28 of the default ONNX operator set.
 
-Other versions of this operator: <a href="Changelog.md#ReduceMin-1">1</a>, <a href="Changelog.md#ReduceMin-11">11</a>, <a href="Changelog.md#ReduceMin-12">12</a>, <a href="Changelog.md#ReduceMin-13">13</a>, <a href="Changelog.md#ReduceMin-18">18</a>
+Other versions of this operator: <a href="Changelog.md#ReduceMin-1">1</a>, <a href="Changelog.md#ReduceMin-11">11</a>, <a href="Changelog.md#ReduceMin-12">12</a>, <a href="Changelog.md#ReduceMin-13">13</a>, <a href="Changelog.md#ReduceMin-18">18</a>, <a href="Changelog.md#ReduceMin-20">20</a>
 
 #### Attributes
 
@@ -29650,7 +29714,7 @@ Other versions of this operator: <a href="Changelog.md#ReduceMin-1">1</a>, <a hr
 #### Type Constraints
 
 <dl>
-<dt><tt>T</tt> : tensor(uint32), tensor(uint64), tensor(int32), tensor(int64), tensor(float16), tensor(float), tensor(double), tensor(bfloat16), tensor(uint8), tensor(int8), tensor(bool)</dt>
+<dt><tt>T</tt> : tensor(uint8), tensor(uint16), tensor(uint32), tensor(uint64), tensor(int8), tensor(int16), tensor(int32), tensor(int64), tensor(float16), tensor(float), tensor(double), tensor(bfloat16), tensor(bool)</dt>
 <dd>Constrain input and output types to numeric and Boolean tensors.</dd>
 </dl>
 
@@ -29818,6 +29882,38 @@ expect(
 
 
 <details>
+<summary>int16_inputs</summary>
+
+```python
+axes = np.array([1], dtype=np.int64)
+keepdims = 1
+
+node = onnx.helper.make_node(
+    "ReduceMin",
+    inputs=["data", "axes"],
+    outputs=["reduced"],
+    keepdims=keepdims,
+)
+
+# Spans the full int16 range, including values that do not fit in int8.
+data = np.array([[-32768, 300], [1000, 32767]], dtype=np.int16)
+reduced = np.minimum.reduce(data, axis=tuple(axes), keepdims=bool(keepdims))
+# print(reduced)
+# [[-32768],
+#  [  1000]]
+
+expect(
+    node,
+    inputs=[data, axes],
+    outputs=[reduced],
+    name="test_reduce_min_int16_inputs",
+)
+```
+
+</details>
+
+
+<details>
 <summary>keepdims</summary>
 
 ```python
@@ -29909,6 +30005,38 @@ expect(
     outputs=[reduced],
     name="test_reduce_min_negative_axes_keepdims_random",
     opset_imports=[onnx.helper.make_opsetid("", 18)],
+)
+```
+
+</details>
+
+
+<details>
+<summary>uint16_inputs</summary>
+
+```python
+axes = np.array([1], dtype=np.int64)
+keepdims = 1
+
+node = onnx.helper.make_node(
+    "ReduceMin",
+    inputs=["data", "axes"],
+    outputs=["reduced"],
+    keepdims=keepdims,
+)
+
+# Spans the full uint16 range, including values that do not fit in uint8.
+data = np.array([[0, 300], [65535, 1000]], dtype=np.uint16)
+reduced = np.minimum.reduce(data, axis=tuple(axes), keepdims=bool(keepdims))
+# print(reduced)
+# [[   0],
+#  [1000]]
+
+expect(
+    node,
+    inputs=[data, axes],
+    outputs=[reduced],
+    name="test_reduce_min_uint16_inputs",
 )
 ```
 

@@ -24,6 +24,22 @@ static std::vector<std::string> GetSupportedDataTypesForReductionOps_opset12(boo
   return OpSchema::numeric_types_for_math_reduction();
 }
 
+// Frozen type sets for the published ReduceMin/ReduceMax schemas. Both predate
+// the int16/uint16 widening at opset 28, so they are spelled out here rather
+// than derived from the current set.
+static std::vector<std::string> MinMaxTypes_opset13_18() {
+  auto data_types = OpSchema::numeric_types_for_math_reduction_ir4();
+  data_types.emplace_back("tensor(uint8)");
+  data_types.emplace_back("tensor(int8)");
+  return data_types;
+}
+
+static std::vector<std::string> MinMaxTypes_opset20() {
+  auto data_types = MinMaxTypes_opset13_18();
+  data_types.emplace_back("tensor(bool)");
+  return data_types;
+}
+
 static std::function<void(OpSchema&)> ReduceDocGenerator_opset12(
     const char* name,
     bool supports_8bit_datatypes = false) {
@@ -437,19 +453,61 @@ The type of the output tensor is integer.)DOC";
 ONNX_OPERATOR_SET_SCHEMA(ArgMax, 11, OpSchema().FillUsing(ArgReduceDocGenerator_opset11("max")));
 ONNX_OPERATOR_SET_SCHEMA(ArgMin, 11, OpSchema().FillUsing(ArgReduceDocGenerator_opset11("min")));
 
-ONNX_OPERATOR_SET_SCHEMA(ReduceMax, 13, OpSchema().FillUsing(ReduceOpGenerator("max", EMPTY_MIN, true)));
-ONNX_OPERATOR_SET_SCHEMA(ReduceMin, 13, OpSchema().FillUsing(ReduceOpGenerator("min", EMPTY_MAX, true)));
-ONNX_OPERATOR_SET_SCHEMA(ReduceSumSquare, 13, OpSchema().FillUsing(ReduceOpGenerator("sum square", EMPTY_ZERO)));
-ONNX_OPERATOR_SET_SCHEMA(ReduceMean, 13, OpSchema().FillUsing(ReduceOpGenerator("mean", EMPTY_UNDEFINED)));
-ONNX_OPERATOR_SET_SCHEMA(ReduceProd, 13, OpSchema().FillUsing(ReduceOpGenerator("product", EMPTY_ONE)));
-ONNX_OPERATOR_SET_SCHEMA(ReduceLogSum, 13, OpSchema().FillUsing(ReduceOpGenerator("log sum", EMPTY_MINUS_INF)));
+ONNX_OPERATOR_SET_SCHEMA(
+    ReduceMax,
+    13,
+    OpSchema().FillUsing(ReduceOpGenerator("max", EMPTY_MIN, MinMaxTypes_opset13_18())));
+ONNX_OPERATOR_SET_SCHEMA(
+    ReduceMin,
+    13,
+    OpSchema().FillUsing(ReduceOpGenerator("min", EMPTY_MAX, MinMaxTypes_opset13_18())));
+ONNX_OPERATOR_SET_SCHEMA(
+    ReduceSumSquare,
+    13,
+    OpSchema().FillUsing(
+        ReduceOpGenerator("sum square", EMPTY_ZERO, OpSchema::numeric_types_for_math_reduction_ir4())));
+ONNX_OPERATOR_SET_SCHEMA(
+    ReduceMean,
+    13,
+    OpSchema().FillUsing(ReduceOpGenerator("mean", EMPTY_UNDEFINED, OpSchema::numeric_types_for_math_reduction_ir4())));
+ONNX_OPERATOR_SET_SCHEMA(
+    ReduceProd,
+    13,
+    OpSchema().FillUsing(ReduceOpGenerator("product", EMPTY_ONE, OpSchema::numeric_types_for_math_reduction_ir4())));
+ONNX_OPERATOR_SET_SCHEMA(
+    ReduceLogSum,
+    13,
+    OpSchema().FillUsing(
+        ReduceOpGenerator("log sum", EMPTY_MINUS_INF, OpSchema::numeric_types_for_math_reduction_ir4())));
 ONNX_OPERATOR_SET_SCHEMA(
     ReduceLogSumExp,
     13,
-    OpSchema().FillUsing(ReduceOpGenerator("log sum exponent", EMPTY_MINUS_INF)));
-ONNX_OPERATOR_SET_SCHEMA(ReduceL1, 13, OpSchema().FillUsing(ReduceOpGenerator("L1 norm", EMPTY_ZERO)));
-ONNX_OPERATOR_SET_SCHEMA(ReduceL2, 13, OpSchema().FillUsing(ReduceOpGenerator("L2 norm", EMPTY_ZERO)));
+    OpSchema().FillUsing(
+        ReduceOpGenerator("log sum exponent", EMPTY_MINUS_INF, OpSchema::numeric_types_for_math_reduction_ir4())));
+ONNX_OPERATOR_SET_SCHEMA(
+    ReduceL1,
+    13,
+    OpSchema().FillUsing(ReduceOpGenerator("L1 norm", EMPTY_ZERO, OpSchema::numeric_types_for_math_reduction_ir4())));
+ONNX_OPERATOR_SET_SCHEMA(
+    ReduceL2,
+    13,
+    OpSchema().FillUsing(ReduceOpGenerator("L2 norm", EMPTY_ZERO, OpSchema::numeric_types_for_math_reduction_ir4())));
 
-ONNX_OPERATOR_SET_SCHEMA(ReduceMax, 18, OpSchema().FillUsing(ReduceOpGenerator("max", EMPTY_MIN, true, true)));
-ONNX_OPERATOR_SET_SCHEMA(ReduceMin, 18, OpSchema().FillUsing(ReduceOpGenerator("min", EMPTY_MAX, true, true)));
+ONNX_OPERATOR_SET_SCHEMA(
+    ReduceMax,
+    18,
+    OpSchema().FillUsing(ReduceOpGenerator("max", EMPTY_MIN, MinMaxTypes_opset13_18(), true)));
+ONNX_OPERATOR_SET_SCHEMA(
+    ReduceMin,
+    18,
+    OpSchema().FillUsing(ReduceOpGenerator("min", EMPTY_MAX, MinMaxTypes_opset13_18(), true)));
+
+ONNX_OPERATOR_SET_SCHEMA(
+    ReduceMax,
+    20,
+    OpSchema().FillUsing(ReduceOpGenerator("max", EMPTY_MIN, MinMaxTypes_opset20(), true)));
+ONNX_OPERATOR_SET_SCHEMA(
+    ReduceMin,
+    20,
+    OpSchema().FillUsing(ReduceOpGenerator("min", EMPTY_MAX, MinMaxTypes_opset20(), true)));
 } // namespace ONNX_NAMESPACE

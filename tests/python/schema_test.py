@@ -82,6 +82,66 @@ class TestSchema:
         assert celu28.has_function
         assert allowed(defs.get_schema("Celu", 12)) == {"tensor(float)"}
 
+    def test_reduce_min_max_type_constraints(self) -> None:
+        def allowed(schema):
+            return next(
+                set(t.allowed_type_strs)
+                for t in schema.type_constraints
+                if t.type_param_str == "T"
+            )
+
+        sixteen_bit = {"tensor(int16)", "tensor(uint16)"}
+        eight_bit = {"tensor(int8)", "tensor(uint8)"}
+        arg_types = allowed(defs.get_schema("ArgMax"))
+        for op in ("ReduceMax", "ReduceMin"):
+            v28 = allowed(defs.get_schema(op, 28))
+            v20 = allowed(defs.get_schema(op, 20))
+            v18 = allowed(defs.get_schema(op, 18))
+
+            assert sixteen_bit <= v28
+            # ReduceMin/ReduceMax select an input element instead of accumulating
+            # over them, so they accept every width ArgMin/ArgMax do, plus bool.
+            assert v28 == arg_types | {"tensor(bool)"}
+
+            # The published opsets keep the types they shipped with.
+            assert not sixteen_bit & v20
+            assert not sixteen_bit & v18
+            assert "tensor(bool)" in v20
+            assert "tensor(bool)" not in v18
+            assert eight_bit <= v20
+            assert eight_bit <= v18
+
+    def test_accumulating_reductions_exclude_narrow_integers(self) -> None:
+        """The narrow integers are withheld from reductions that accumulate.
+
+        Summing or multiplying many 8- or 16-bit values overflows, which is why
+        these ops sit on a set that starts at 32 bits. ReduceMin/ReduceMax are
+        deliberately excluded from this rule; see
+        test_reduce_min_max_type_constraints.
+        """
+        narrow = {
+            "tensor(int8)",
+            "tensor(uint8)",
+            "tensor(int16)",
+            "tensor(uint16)",
+        }
+        for op in (
+            "ReduceSum",
+            "ReduceMean",
+            "ReduceProd",
+            "ReduceSumSquare",
+            "ReduceL1",
+            "ReduceL2",
+            "ReduceLogSum",
+            "ReduceLogSumExp",
+        ):
+            allowed_types = next(
+                set(t.allowed_type_strs)
+                for t in defs.get_schema(op).type_constraints
+                if t.type_param_str == "T"
+            )
+            assert not narrow & allowed_types, op
+
     def test_range_supported_types(self) -> None:
         """Test Range operator supports all expected numeric types."""
         range_schema = defs.get_schema("Range")

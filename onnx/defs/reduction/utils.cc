@@ -10,27 +10,24 @@
 
 namespace ONNX_NAMESPACE {
 
-static std::vector<std::string> GetSupportedDataTypesForReductionOps(bool supports8bit, bool supports_bool) {
-  auto data_types = OpSchema::numeric_types_for_math_reduction_ir4();
-  if (supports8bit) {
-    data_types.emplace_back("tensor(uint8)");
-    data_types.emplace_back("tensor(int8)");
-  }
-  if (supports_bool) {
-    data_types.emplace_back("tensor(bool)");
-  }
-
+const std::vector<std::string>& MinMaxReductionTypes() {
+  static const std::vector<std::string> data_types = [] {
+    auto types = OpSchema::all_numeric_types_ir4();
+    types.emplace_back("tensor(bool)");
+    return types;
+  }();
   return data_types;
 }
 
 std::function<void(OpSchema&)> ReduceOpGenerator(
     const char* name,
     const char* empty_value,
-    bool supports_8bit_datatypes,
+    const std::vector<std::string>& allowed_types,
     bool axes_input,
     const char* func_body,
-    const ContextDependentFunctionBodyBuilder& function_builder,
-    bool supports_boolean_datatype /* = false */) {
+    const ContextDependentFunctionBodyBuilder& function_builder) {
+  const bool supports_boolean_datatype =
+      std::find(allowed_types.begin(), allowed_types.end(), "tensor(bool)") != allowed_types.end();
   return [=](OpSchema& schema) {
     std::string doc = R"DOC(
 Computes the {name} of the input tensor's elements along the provided axes. The resulting
@@ -98,7 +95,7 @@ to `False` instead of `True`.)DOC";
     schema.Output(0, "reduced", "Reduced output tensor.", "T", OpSchema::Single, true, 1, OpSchema::Differentiable);
     schema.TypeConstraint(
         "T",
-        GetSupportedDataTypesForReductionOps(supports_8bit_datatypes, supports_boolean_datatype),
+        allowed_types,
         supports_boolean_datatype ? "Constrain input and output types to numeric and Boolean tensors."
                                   : "Constrain input and output types to numeric tensors.");
     if (func_body) {

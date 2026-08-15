@@ -12,13 +12,13 @@ namespace ONNX_NAMESPACE {
 
 ONNX_OPERATOR_SET_SCHEMA(
     ReduceMax,
-    20,
-    OpSchema().FillUsing(ReduceOpGenerator("max", EMPTY_MIN, true, true, nullptr, nullptr, true)));
+    28,
+    OpSchema().FillUsing(ReduceOpGenerator("max", EMPTY_MIN, MinMaxReductionTypes(), true)));
 
 ONNX_OPERATOR_SET_SCHEMA(
     ReduceMin,
-    20,
-    OpSchema().FillUsing(ReduceOpGenerator("min", EMPTY_MAX, true, true, nullptr, nullptr, true)));
+    28,
+    OpSchema().FillUsing(ReduceOpGenerator("min", EMPTY_MAX, MinMaxReductionTypes(), true)));
 
 ONNX_OPERATOR_SET_SCHEMA(ReduceSum, 13, OpSchema().FillUsing(ReduceOpDynamicAxes("sum", EMPTY_ZERO)));
 
